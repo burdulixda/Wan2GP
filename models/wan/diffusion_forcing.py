@@ -21,6 +21,9 @@ from shared.utils.fm_solvers import (FlowDPMSolverMultistepScheduler,
 from shared.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from shared.utils.loras_mutipliers import update_loras_slists
 from shared.utils import files_locator as fl
+from shared.accelerator import get_preferred_device
+
+
 class DTT2V:
 
 
@@ -39,7 +42,7 @@ class DTT2V:
         VAE_dtype = torch.float32,
         mixed_precision_transformer = False,
     ):
-        self.device = torch.device(f"cuda")
+        self.device = torch.device(get_preferred_device())
         self.config = config
         self.dtype = dtype
         self.num_train_timesteps = config.num_train_timesteps

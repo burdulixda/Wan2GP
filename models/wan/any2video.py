@@ -48,6 +48,7 @@ from shared.utils.text_encoder_cache import TextEncoderCache
 from shared.utils.self_refiner import PnPHandler, create_self_refiner_handler
 from mmgp import safetensors2
 from shared.utils import files_locator as fl 
+from shared.accelerator import get_preferred_device
 from .scail2 import prepare_scail2_conditioning
 
 WAN_USE_FP32_ROPE_FREQS = True
@@ -103,7 +104,7 @@ class WanAny2V:
         mixed_precision_transformer = False,
         VAE_upsampling = None,
     ):
-        self.device = torch.device(f"cuda")
+        self.device = torch.device(get_preferred_device())
         self.config = config
         self.VAE_dtype = VAE_dtype
         self.dtype = dtype
@@ -161,7 +162,7 @@ class WanAny2V:
         
         self.vae = vae( vae_pth=fl.locate_file(vae_checkpoint), dtype= VAE_dtype, upsampler_factor = vae_upsampler_factor, device="cpu")
         self.vae.upsampling_set = VAE_upsampling
-        self.vae.device = self.device # need to set to cuda so that vae buffers are properly moved (although the rest will stay in the CPU)
+        self.vae.device = self.device # need to set to the accelerator so VAE buffers are properly moved (although the rest will stay in the CPU)
         self.vae2 = None
         if vae_checkpoint2 is not None:
             self.vae2 = vae( vae_pth=fl.locate_file(vae_checkpoint2), dtype= VAE_dtype, device="cpu")
@@ -341,7 +342,8 @@ class WanAny2V:
                     
         return torch.cat(ref_vae_latents, dim=1)
 
-    def get_i2v_mask(self, lat_h, lat_w, nb_frames_unchanged=0, mask_pixel_values=None, lat_t =0,  device="cuda"):
+    def get_i2v_mask(self, lat_h, lat_w, nb_frames_unchanged=0, mask_pixel_values=None, lat_t =0,  device=None):
+        device = device or self.device
         if mask_pixel_values is None:
             msk = torch.zeros(1, (lat_t-1) * 4 + 1, lat_h, lat_w, device=device)
         else:
