@@ -13,6 +13,7 @@ from .pipeline_qwenimage import QwenImagePipeline
 from PIL import Image
 from shared.utils.utils import calculate_new_dimensions, convert_tensor_to_image
 from shared.utils import files_locator as fl 
+from shared.accelerator import get_preferred_device
 
 _QWEN_FUSED_SPLIT_MAP = {
     "attn.to_qkv": {"mapped_modules": ("attn.to_q", "attn.to_k", "attn.to_v")},
@@ -263,7 +264,7 @@ class model_factory():
             joint_pass = joint_pass,
             denoising_strength=denoising_strength,
             masking_strength=masking_strength,
-            generator=torch.Generator(device="cuda").manual_seed(seed),
+            generator=torch.Generator(device=get_preferred_device()).manual_seed(seed),
             model_mode = model_mode,
             outpainting_dims = outpainting_dims,
             qwen_edit_plus = qwen_edit_plus,

@@ -27,6 +27,7 @@ from diffusers import FlowMatchEulerDiscreteScheduler
 from PIL import Image
 from shared.utils.utils import calculate_new_dimensions, convert_image_to_tensor, convert_tensor_to_image
 from shared.utils.text_encoder_cache import TextEncoderCache
+from shared.accelerator import get_preferred_device
 
 XLA_AVAILABLE = False
 
@@ -175,6 +176,7 @@ class QwenImagePipeline(): #DiffusionPipeline
         self.tokenizer=tokenizer
         self.transformer=transformer
         self.processor = processor
+        self._execution_device = torch.device(get_preferred_device())
 
         self.latent_channels = self.vae.z_dim if getattr(self, "vae", None) else 16
         self.vae_scale_factor = 8 # 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
@@ -700,7 +702,7 @@ class QwenImagePipeline(): #DiffusionPipeline
             batch_size = len(prompt)
         else:
             batch_size = prompt_embeds.shape[0]
-        device = "cuda"
+        device = self._execution_device
 
         num_layers = max(1, int(layers) if layers is not None else 1)
         effective_batch_size = batch_size * num_images_per_prompt
