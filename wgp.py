@@ -6,7 +6,7 @@ if p not in sys.path:
     sys.path.insert(0, p)
 from shared.native_runtime import preload_preferred_libstdcxx
 preload_preferred_libstdcxx()
-from shared.default_device import set_default_cuda_device_from_arg; set_default_cuda_device_from_arg("gpu")
+from shared.default_device import set_default_device_from_arg; set_default_device_from_arg("gpu")
 # # os.environ.pop("TORCH_LOGS", None)  # make sure no env var is suppressing/overriding
 # os.environ["TORCH_LOGS"]= "recompiles"
 import torch._logging as tlog
@@ -66,6 +66,16 @@ from shared.utils.virtual_media import get_virtual_image, get_virtual_media_entr
 from shared.utils.frame_scheduler import build_extension_window, build_frame_scheduler, has_slash_commands, prepare_loras_mult_windows
 from shared.match_archi import match_nvidia_architecture
 from shared.attention import get_attention_modes, get_supported_attention_modes, get_default_attention_mode
+from shared.accelerator import (
+    empty_cache as accelerator_empty_cache,
+    get_device_capability,
+    get_device_total_memory_mb,
+    get_preferred_device,
+    is_bfloat16_supported,
+    manual_seed_all as accelerator_manual_seed_all,
+    set_device as accelerator_set_device,
+    synchronize as accelerator_synchronize,
+)
 from shared.utils.utils import truncate_for_filesystem, sanitize_file_name, process_images_multithread, get_default_workers, resize_lanczos_frames, expand_or_shrink_mask, prepare_binary_mask_frame
 from shared.utils.process_locks import (
     acquire_GPU_ressources,
@@ -2392,17 +2402,12 @@ attention_modes_supported = get_supported_attention_modes()
 args = parse_wgp_args(family_handlers, CONFIG_FILENAME, DEFAULT_LORA_ROOT)
 migrate_loras_layout()
 
-gpu_major, gpu_minor = torch.cuda.get_device_capability(args.gpu if len(args.gpu) > 0 else None)
-if  gpu_major < 8:
-    print("Switching to FP16 models when possible as GPU architecture doesn't support optimed BF16 Kernels")
-    bfloat16_supported = False
-else:
-    bfloat16_supported = True
-
+processing_device = get_preferred_device(args.gpu)
+gpu_major, gpu_minor = get_device_capability(processing_device)
+bfloat16_supported = is_bfloat16_supported(processing_device)
+if not bfloat16_supported:
+    print("Switching to FP16 models when possible as selected accelerator doesn't support optimized BF16 kernels")
 args.flow_reverse = True
-processing_device = args.gpu
-if len(processing_device) == 0:
-    processing_device = "mps" if is_mps else "cuda"
 # torch.backends.cuda.matmul.allow_fp16_accumulation = True
 lock_ui_attention = False
 lock_ui_transformer = False
@@ -4062,7 +4067,8 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         # kwargs["pinnedMemory"] = "text_encoder"
         offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
     if len(args.gpu) > 0:
-        torch.set_default_device(args.gpu)
+        accelerator_set_device(processing_device)
+        torch.set_default_device(processing_device)
     transformer_type = model_type
     loaded_profile = profile
     return wan_model, offloadobj 
@@ -5308,7 +5314,7 @@ def extract_faces_from_video_with_mask(input_video_path, input_mask_path, max_fr
 
     face_processor = None
     gc.collect()
-    torch.cuda.empty_cache()
+    accelerator_empty_cache(processing_device)
 
     face_tensor= torch.tensor(np.stack(face_list, dtype= np.float32) / 127.5 - 1).permute(-1, 0, 1, 2 ) # t h w c -> c t h w
     if pad_frames > 0:
@@ -5518,7 +5524,7 @@ def preprocess_video_with_mask(pre_video_guide, input_video_path, input_mask_pat
     preproc = None
     preproc_outside = None
     gc.collect()
-    torch.cuda.empty_cache()
+    accelerator_empty_cache(processing_device)
     if pad_frames > 0:
         masked_frames = masked_frames[0] * pad_frames + masked_frames
         if any_mask: masked_frames = masks[0] * pad_frames + masks
@@ -5755,7 +5761,7 @@ def set_seed(seed):
     import random
     seed = random.randint(0, 999999999) if seed == None or seed < 0 else seed
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    accelerator_manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
@@ -6773,7 +6779,7 @@ def generate_media(
         perturbation_layers = None
 
     offload.shared_state["_attention"] =  attn
-    device_mem_capacity = torch.cuda.get_device_properties(0).total_memory / 1048576
+    device_mem_capacity = get_device_total_memory_mb(processing_device)
     if  hasattr(wan_model, "vae") and hasattr(wan_model.vae, "get_VAE_tile_size"):
         get_tile_size = wan_model.vae.get_VAE_tile_size
         try:
@@ -6872,7 +6878,7 @@ def generate_media(
 
     current_video_length = video_length
     # VAE Tiling
-    device_mem_capacity = torch.cuda.get_device_properties(None).total_memory / 1048576
+    device_mem_capacity = get_device_total_memory_mb(processing_device)
     guide_inpaint_color = model_def.get("guide_inpaint_color", 127.5)
     if image_mode==2:
         guide_inpaint_color = model_def.get("inpaint_color", guide_inpaint_color)
@@ -7092,7 +7098,7 @@ def generate_media(
     os.makedirs(image_save_path, exist_ok=True)
     os.makedirs(audio_save_path, exist_ok=True)
     gc.collect()
-    torch.cuda.empty_cache()
+    accelerator_empty_cache(processing_device)
     wan_model._interrupt = False
     abort = False
     if gen.get("abort", False):
@@ -7459,7 +7465,7 @@ def generate_media(
                             face_arc_embeds = face_arc_embeds.squeeze(0).cpu()
                             face_encoder = image_pil = None
                             gc.collect()
-                            torch.cuda.empty_cache()
+                            accelerator_empty_cache(processing_device)
 
                         if remove_background_images_ref > 0:
                             send_cmd("progress", [0, get_latest_status(state, "Removing Images References Background")])
@@ -7742,7 +7748,7 @@ def generate_media(
                 #     torch._dynamo.config.cache_size_limit = cache_size
 
                 gc.collect()
-                torch.cuda.empty_cache()
+                accelerator_empty_cache(processing_device)
                 s = str(e)
                 keyword_list = {"CUDA out of memory" : "VRAM", "Tried to allocate":"VRAM", "CUDA error: out of memory": "RAM", "CUDA error: too many resources requested": "RAM"}
                 crash_type = ""
@@ -7796,7 +7802,7 @@ def generate_media(
             clear_gen_cache()
             offloadobj.unload_all()
             gc.collect()
-            torch.cuda.empty_cache()
+            accelerator_empty_cache(processing_device)
 
             if samples == None:
                 abort = True
@@ -8345,7 +8351,7 @@ def process_tasks(state):
                     current_model_type = queue[0]["params"].get("model_type")
             
             try:
-                torch.cuda.current_stream().synchronize()
+                accelerator_synchronize(processing_device)
                 preview = None if data is None else generate_preview(current_model_type, data) 
                 gen["preview"] = preview
                 yield time.time(), gr.Text(), gr.update()

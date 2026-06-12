@@ -30,7 +30,8 @@ def _rewrite_arg_value(argv: MutableSequence[str], option: str, value: str) -> N
             return
 
 
-def set_default_cuda_device_from_arg(arg_name: str, default_device: str = "cuda:0") -> bool:
+def set_default_device_from_arg(arg_name: str, default_device: str = "cuda:0") -> bool:
+    """Normalize CUDA ordinal args while leaving other backends untouched."""
     option = _arg_name_to_option(arg_name)
     if not option:
         return False
@@ -50,3 +51,7 @@ def set_default_cuda_device_from_arg(arg_name: str, default_device: str = "cuda:
     os.environ["CUDA_VISIBLE_DEVICES"] = visible_device
     _rewrite_arg_value(argv, option, default_device)
     return True
+
+
+def set_default_cuda_device_from_arg(arg_name: str, default_device: str = "cuda:0") -> bool:
+    return set_default_device_from_arg(arg_name, default_device)

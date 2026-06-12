@@ -1,5 +1,4 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
-import sys
 from contextlib import contextmanager
 
 import torch
@@ -7,12 +6,14 @@ from importlib.metadata import version
 from mmgp import offload
 import torch.nn.functional as F
 import warnings
-from importlib.metadata import version
+from shared.accelerator import (
+    get_accelerator_type,
+    get_device_capability,
+    get_preferred_device,
+    is_bfloat16_supported,
+)
 
-_is_mps = sys.platform == 'darwin' and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
-
-major, minor = (0, 0) if _is_mps else torch.cuda.get_device_capability(None)
-bfloat16_supported =  major >= 8
+bfloat16_supported = is_bfloat16_supported()
 _MASKED_ATTENTION_SDPA_WARNED = False
 _MISSING = object()
 
@@ -233,11 +234,11 @@ def get_attention_modes():
     return ret
 
 def get_supported_attention_modes():
-    # MPS compatibility: only SDPA is supported on Apple Silicon
-    if _is_mps:
+    # Non-CUDA backends start with PyTorch SDPA only.
+    if get_accelerator_type() != "cuda" or not torch.cuda.is_available():
         return ["sdpa", "auto"]
     ret = get_attention_modes()
-    major, minor = torch.cuda.get_device_capability()
+    major, minor = get_device_capability()
     if  major < 10 or not triton_installed:
         if "sage3" in ret:
             ret.remove("sage3")
@@ -263,9 +264,9 @@ def get_default_attention_mode():
 
 
 def get_current_cuda_architecture(device=None):
-    if _is_mps or not torch.cuda.is_available():
+    if get_accelerator_type(device) != "cuda" or not torch.cuda.is_available():
         return None
-    major, minor = torch.cuda.get_device_capability(device)
+    major, minor = get_device_capability(device)
     return major * 10 + minor
 
 
@@ -321,9 +322,8 @@ __all__ = [
 ]
 
 def get_cu_seqlens(batch_size, lens, max_len):
-    # MPS compatibility: use dynamic device detection
-    _cu_device = "mps" if _is_mps else "cuda"
-    cu_seqlens = torch.zeros([2 * batch_size + 1], dtype=torch.int32, device=_cu_device)
+    cu_device = getattr(lens, "device", None) or get_preferred_device()
+    cu_seqlens = torch.zeros([2 * batch_size + 1], dtype=torch.int32, device=cu_device)
 
     for i in range(batch_size):
         s = lens[i] 
@@ -357,8 +357,9 @@ def pay_attention(
         requested_attn = offload.shared_state["_attention"] if force_attention == None else force_attention
         requested_attn = "sage2" if requested_attn == "radial" else requested_attn
         support_reason = None
-        if _is_mps:
-            support_reason = "MPS uses SDPA for masked attention"
+        accelerator = get_accelerator_type()
+        if accelerator != "cuda":
+            support_reason = f"{accelerator.upper()} uses SDPA for masked attention"
         elif requested_attn == "sage2" and sageattn2 != None and q_lens == None and k_lens == None:
             support_reason = sageattn_attention_mask_support_reason(qkv_list, attention_mask, tensor_layout="NHD")
         if requested_attn == "sage2" and support_reason is None and sageattn2 != None and q_lens == None and k_lens == None:
