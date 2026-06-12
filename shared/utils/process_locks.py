@@ -1,6 +1,6 @@
 import time
 import threading
-import torch
+from shared.accelerator import synchronize as accelerator_synchronize
 
 gen_lock = threading.Lock()
 _MAIN_PROCESS_RUNNING_KEY = "main_process_running"
@@ -73,8 +73,8 @@ def _run_release_actions(release_actions):
             release_callback()
         except Exception as exc:
             print(f"[GPU] Unable to release resident VRAM for {process_name} ({resident_id}): {exc}")
-    if len(release_actions) > 0 and torch.cuda.is_available():
-        torch.cuda.synchronize()
+    if len(release_actions) > 0:
+        accelerator_synchronize()
 
 
 def register_GPU_resident(state, process_id, process_name, release_vram_callback = None, force_release_on_acquire = True):
@@ -102,8 +102,7 @@ def force_release_GPU_resident(state, process_id):
             release_callback = resident_info.get("release_vram_callback", None)
     if callable(release_callback):
         release_callback()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        accelerator_synchronize()
 
 
 def acquire_main_GPU_ressources(state):
@@ -118,8 +117,7 @@ def acquire_main_GPU_ressources(state):
                 break
         time.sleep(0.1)
     _run_release_actions(release_actions)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    accelerator_synchronize()
     
 def acquire_GPU_ressources(state, process_id, process_name, gr = None, custom_pause_msg = None, custom_wait_msg = None):
     gen = get_gen_info(state)
@@ -190,13 +188,11 @@ def acquire_GPU_ressources(state, process_id, process_name, gr = None, custom_pa
 
     with gen_lock:
         process_hierarchy[process_id] = original_process_status
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    accelerator_synchronize()
 
 def release_GPU_ressources(state, process_id, keep_resident = False, process_name = None, release_vram_callback = None, force_release_on_acquire = True):
     gen = get_gen_info(state)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    accelerator_synchronize()
     with gen_lock:
         if keep_resident:
             _get_gpu_residents(gen)[process_id] = {
