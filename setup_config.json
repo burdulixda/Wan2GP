@@ -23,6 +23,10 @@
             "mps": {
                 "label": "Torch (MPS / Apple Silicon)",
                 "cmd": "torch torchvision torchaudio"
+            },
+            "xpu": {
+                "label": "Torch (Intel XPU)",
+                "cmd": "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu"
             }
         },
         "triton": {
@@ -137,6 +141,7 @@
         "AMD_GFX110X": { "python": "3.11", "torch": "rocm65", "triton": null, "sage": null, "sparge": null, "flash": null, "kernels": [], "env": {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"} },
         "AMD_GFX1151": { "python": "3.11", "torch": "rocm65", "triton": null, "sage": null, "sparge": null, "flash": null, "kernels": [], "env": {"HSA_OVERRIDE_GFX_VERSION": "11.5.1"} },
         "AMD_GFX1201": { "python": "3.11", "torch": "rocm65", "triton": null, "sage": null, "sparge": null, "flash": null, "kernels": [], "env": {"HSA_OVERRIDE_GFX_VERSION": "12.0.1"} },
-        "MPS":         { "python": "3.11", "torch": "mps", "triton": null, "sage": null, "sparge": null, "flash": null, "kernels": [], "attention": "sdpa" }
+        "MPS":         { "python": "3.11", "torch": "mps", "triton": null, "sage": null, "sparge": null, "flash": null, "kernels": [], "attention": "sdpa" },
+        "INTEL_XPU":   { "python": "3.11", "torch": "xpu", "triton": null, "sage": null, "sparge": null, "flash": null, "kernels": [], "attention": "sdpa" }
     }
 }

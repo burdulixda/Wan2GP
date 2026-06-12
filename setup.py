@@ -212,20 +212,25 @@ def get_gpu_info():
                 encoding='utf-8',
                 stderr=subprocess.DEVNULL
             )
-            name = name.replace("Name", "").strip().split('\n')[0].strip()
-            if "Radeon" in name or "AMD" in name: return name, "AMD"
-            return name, "INTEL"
+            names = [line.strip() for line in name.replace("Name", "").splitlines() if line.strip()]
+            for detected_name in names:
+                if "NVIDIA" in detected_name: return detected_name, "NVIDIA"
+            for detected_name in names:
+                if "Radeon" in detected_name or "AMD" in detected_name: return detected_name, "AMD"
+            for detected_name in names:
+                if "Intel" in detected_name: return detected_name, "INTEL"
         except: pass
     else:
         try:
             name = subprocess.check_output(
-                "lspci | grep -i vga",
+                "lspci | grep -Ei 'vga|3d|display'",
                 shell=True,
                 encoding='utf-8',
                 stderr=subprocess.DEVNULL
             )
             if "NVIDIA" in name: return name, "NVIDIA"
             if "AMD" in name or "Advanced Micro Devices" in name: return name, "AMD"
+            if "Intel" in name: return name, "INTEL"
         except: pass
 
     return "Unknown", "UNKNOWN"
@@ -245,6 +250,8 @@ def get_profile_key(gpu_name, vendor):
         if any(x in g for x in ["7000", "Z1", "PHOENIX"]): return "AMD_GFX1151"
         if any(x in g for x in ["8000", "STRIX", "1201"]): return "AMD_GFX1201"
         return "AMD_GFX110X"
+    elif vendor == "INTEL":
+        return "INTEL_XPU"
     return "RTX_40"
 
 def get_os_key():
@@ -462,7 +469,8 @@ def do_install_interactive(env_type, config, detected_key):
         install_logic(name, env_type, path, py_k, torch_k, triton_k, sage_k, sparge_k, flash_k, kernels, config)
 
     elif mode == "3":
-        p = config['gpu_profiles']['RTX_50']
+        latest_key = 'RTX_50' if detected_key.startswith(("RTX", "GTX")) else detected_key
+        p = config['gpu_profiles'][latest_key]
         install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('sparge'), p.get('flash'), p['kernels'], config)
     else:
         p = config['gpu_profiles'][detected_key]
