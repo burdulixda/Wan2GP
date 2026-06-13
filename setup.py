@@ -179,6 +179,25 @@ def load_config():
         sys.exit(1)
     with open(CONFIG_PATH, 'r') as f: return json.load(f)
 
+def _classify_gpu_names(names):
+    names = [str(name or "").strip() for name in names if str(name or "").strip()]
+    for detected_name in names:
+        if "NVIDIA" in detected_name.upper():
+            return detected_name, "NVIDIA"
+    for detected_name in names:
+        upper_name = detected_name.upper()
+        if "INTEL" in upper_name and "ARC" in upper_name:
+            return detected_name, "INTEL"
+    for detected_name in names:
+        upper_name = detected_name.upper()
+        if "RADEON" in upper_name or "AMD" in upper_name:
+            return detected_name, "AMD"
+    for detected_name in names:
+        if "INTEL" in detected_name.upper():
+            return detected_name, "INTEL"
+    return None
+
+
 def get_gpu_info():
     if sys.platform == "darwin":
         try:
@@ -213,12 +232,25 @@ def get_gpu_info():
                 stderr=subprocess.DEVNULL
             )
             names = [line.strip() for line in name.replace("Name", "").splitlines() if line.strip()]
-            for detected_name in names:
-                if "NVIDIA" in detected_name: return detected_name, "NVIDIA"
-            for detected_name in names:
-                if "Radeon" in detected_name or "AMD" in detected_name: return detected_name, "AMD"
-            for detected_name in names:
-                if "Intel" in detected_name: return detected_name, "INTEL"
+            detected = _classify_gpu_names(names)
+            if detected is not None:
+                return detected
+        except: pass
+        try:
+            name = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+                ],
+                encoding='utf-8',
+                stderr=subprocess.DEVNULL
+            )
+            names = [line.strip() for line in name.splitlines() if line.strip()]
+            detected = _classify_gpu_names(names)
+            if detected is not None:
+                return detected
         except: pass
     else:
         try:
