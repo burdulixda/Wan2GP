@@ -3,6 +3,7 @@
 # I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
 # Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 import math
+from contextlib import nullcontext
 from einops import rearrange
 import torch
 import torch.cuda.amp as amp
@@ -383,7 +384,12 @@ class WanSelfAttention(nn.Module):
             x = pay_attention( qkv_list, recycle_q=True)
 
         else:
-            with sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+            sdpa_context = (
+                sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False)
+                if q.device.type == "cuda"
+                else nullcontext()
+            )
+            with sdpa_context:
                 x = (
                     torch.nn.functional.scaled_dot_product_attention(
                         q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=block_mask

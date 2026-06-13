@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 
 from shared.attention import pay_attention
+from shared.accelerator import get_accelerator_type
 from .tokenizers import HuggingfaceTokenizer
 from .xlm_roberta import XLMRoberta
 
@@ -544,6 +545,6 @@ class CLIPModel:
         videos = self.transforms.transforms[-1](videos.mul_(0.5).add_(0.5))
 
         # forward
-        with torch.amp.autocast(dtype=self.dtype, device_type="cuda"):
+        with torch.amp.autocast(dtype=self.dtype, device_type=get_accelerator_type(self.device)):
             out = self.model.visual(videos.to(torch.bfloat16), use_31_block=True)
             return out
