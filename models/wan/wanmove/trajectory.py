@@ -13,15 +13,34 @@ import torch
 from PIL import Image, ImageDraw
 from torchvision import transforms
 
+from shared.accelerator import (
+    get_accelerator_type,
+    get_preferred_device,
+    is_mps_available,
+    is_xpu_available,
+)
 
 
 SKIP_ZERO = False
+
+
+def _default_device() -> torch.device:
+    preferred_device = get_preferred_device()
+    accelerator = get_accelerator_type(preferred_device)
+    if accelerator == "cuda" and torch.cuda.is_available():
+        return torch.device(preferred_device)
+    if accelerator == "xpu" and is_xpu_available():
+        return torch.device(preferred_device)
+    if accelerator == "mps" and is_mps_available():
+        return torch.device(preferred_device)
+    return torch.device("cpu")
+
 
 def get_pos_emb(
     pos_k: torch.Tensor,
     pos_emb_dim: int,
     theta_func: callable = lambda i, d: torch.pow(10000, torch.mul(2, torch.div(i.to(torch.float32), d))),
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = _default_device(),
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """
@@ -68,7 +87,7 @@ def create_pos_feature_map(
     pos_emb_dim: int,
     track_num: int = -1,
     t_down_strategy: str = "sample",
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = _default_device(),
     dtype: torch.dtype = torch.float32,
 ):
     """
@@ -180,7 +199,7 @@ def get_video_track_video(
     grid_size: int = 32,
     track_num: int = -1,
     t_down_strategy: str = "sample",
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = _default_device(),
     dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -230,7 +249,7 @@ def resize_tracks(
     img_tracks: torch.Tensor, # [T, N, height, width]
     target_frame_num: int,
     t_strategy: str = "sample",
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = _default_device(),
     dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -327,7 +346,7 @@ def generate_custom_feature_map(
     downsample_ratios: list[int],
     pos_emb_dim: int,
     t_down_strategy: str = "sample",
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    device: torch.device = _default_device(),
     dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
