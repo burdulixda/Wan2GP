@@ -12,6 +12,7 @@ import torch
 import whisper
 from safetensors.torch import load_file as load_safetensors_file
 
+from shared.accelerator import empty_cache, get_accelerator_type, get_preferred_device, is_xpu_available
 from shared.deepy import video_tools as deepy_video_tools
 from shared.deepy.assets import (
     WHISPER_MEDIUM_CONFIG_FILENAME,
@@ -106,6 +107,16 @@ def _load_whisper_medium(device: torch.device) -> whisper.Whisper:
     return model.to(device=device, dtype=torch.float32)
 
 
+def _select_transcription_device() -> torch.device:
+    preferred_device = get_preferred_device()
+    accelerator = get_accelerator_type(preferred_device)
+    if accelerator == "cuda" and torch.cuda.is_available():
+        return torch.device(preferred_device)
+    if accelerator == "xpu" and is_xpu_available():
+        return torch.device(preferred_device)
+    return torch.device("cpu")
+
+
 def _make_temp_audio_path() -> Path:
     _TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     return (_TEMP_ROOT / f"{uuid.uuid4().hex}.wav").resolve()
@@ -158,7 +169,7 @@ def transcribe_media(source_path: str, *, timestamp_type: str | None = None, aud
     source_path = str(source_path or "").strip()
     if len(source_path) == 0 or not os.path.isfile(source_path):
         raise FileNotFoundError(f"Media file not found: {source_path}")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _select_transcription_device()
     audio_path, temporary_paths = _prepare_audio_input(source_path, audio_track_no=audio_track_no)
     model = None
     try:
@@ -178,8 +189,8 @@ def transcribe_media(source_path: str, *, timestamp_type: str | None = None, aud
         if model is not None:
             del model
         gc.collect()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        if device.type != "cpu":
+            empty_cache(device)
 
     segments = list(raw_result.get("segments", []) or [])
     payload = {
