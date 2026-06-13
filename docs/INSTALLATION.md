@@ -57,6 +57,12 @@ pip install triton-windows
 ### Linux
 Triton library should be automatically installed when installing pytorch.
 
+### Intel XPU
+Do not use the Windows RTX `triton-windows` packages for Intel XPU. The Intel
+path uses the PyTorch XPU wheel and probes individual XPU-safe Triton fallback
+kernels at runtime. See [INTEL-XPU-INSTALLATION.md](INTEL-XPU-INSTALLATION.md)
+for the current supported baseline.
+
 ## Sage Attention
 Sage Attention accelerates a Video / Image Generation up to x2 with very little quality loss. Sage doesnt support GTX 10xx.
 

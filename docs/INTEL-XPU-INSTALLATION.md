@@ -58,6 +58,24 @@ python wgp.py --gpu xpu --attention sdpa --profile 5 --fp16
 If the app starts and a small generation succeeds, try removing `--fp16` to use
 the default dtype policy.
 
+## Optional XPU Triton Fallbacks
+
+Intel XPU does not enable the CUDA/vLLM acceleration stack. Sage Attention,
+Sparge Attention, Flash Attention, CUDA graphs, and other CUDA kernels remain
+disabled on XPU unless they are tested separately.
+
+Wan2GP can, however, probe small native Triton kernels used by the safe Qwen
+prompt-enhancer fallback runtime. Only kernels that pass an XPU smoke test are
+enabled.
+
+The probe uses the compiler environment that is already visible to the Wan2GP
+process; it does not search platform-specific install directories. On Windows,
+launch from a Visual Studio Developer Command Prompt, run `VsDevCmd.bat` before
+starting Wan2GP, or set `CC` and `CXX` to a working compiler. On Linux, make sure
+a C/C++ toolchain such as `gcc`/`g++`, `clang`/`clang++`, or Intel
+`icx`/`icpx` is on `PATH`. Set `WGP_XPU_TRITON_FALLBACKS=0` to disable these
+optional fallback probes.
+
 ## Notes
 
 PyTorch documents Intel GPU support through the `torch.xpu` API, including

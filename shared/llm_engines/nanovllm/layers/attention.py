@@ -34,6 +34,10 @@ def configure_attention_safe_legacy_kernels(enabled: bool) -> None:
     _USE_TRITON_KV_CACHE = triton is not None and tl is not None
 
 
+def _is_triton_runtime_device(device: torch.device) -> bool:
+    return device.type in ("cuda", "xpu")
+
+
 if triton is not None and tl is not None:
     @triton.jit
     def store_kvcache_kernel(
@@ -205,7 +209,17 @@ def store_kvcache(
     assert slot_mapping.numel() == key.shape[0]
     if use_triton_kv_cache is None:
         use_triton_kv_cache = _USE_TRITON_KV_CACHE
-    if use_triton_kv_cache:
+    can_use_triton_kv_cache = (
+        bool(use_triton_kv_cache)
+        and triton is not None
+        and tl is not None
+        and _is_triton_runtime_device(key.device)
+        and value.device == key.device
+        and k_cache.device == key.device
+        and v_cache.device == key.device
+        and slot_mapping.device == key.device
+    )
+    if can_use_triton_kv_cache:
         N, num_heads, head_dim = key.shape
         D = num_heads * head_dim
         assert key.stride(-1) == 1 and value.stride(-1) == 1
@@ -230,6 +244,43 @@ def store_kvcache(
     slot_ids = slot_mapping[valid_mask].long()
     flat_k_cache[slot_ids] = key[valid_mask]
     flat_v_cache[slot_ids] = value[valid_mask]
+
+
+def smoke_triton_kv_cache(device: torch.device) -> tuple[bool, str]:
+    if triton is None or tl is None:
+        return False, "Triton import is not available"
+    device = torch.device(device)
+    if not _is_triton_runtime_device(device):
+        return False, f"Unsupported Triton device type: {device.type}"
+    try:
+        n_tokens, num_heads, head_dim = 3, 2, 4
+        key = torch.arange(n_tokens * num_heads * head_dim, device=device, dtype=torch.float32).reshape(n_tokens, num_heads, head_dim)
+        value = (key + 100).contiguous()
+        k_cache = torch.zeros(2, 4, num_heads, head_dim, device=device, dtype=torch.float32)
+        v_cache = torch.zeros_like(k_cache)
+        slot_mapping = torch.tensor([0, 3, 5], device=device, dtype=torch.int64)
+
+        store_kvcache(key, value, k_cache, v_cache, slot_mapping, use_triton_kv_cache=True)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "xpu" and hasattr(torch, "xpu"):
+            torch.xpu.synchronize(device)
+
+        expected_k = torch.zeros_like(k_cache)
+        expected_v = torch.zeros_like(v_cache)
+        expected_k.reshape(-1, num_heads, head_dim)[slot_mapping.long()] = key
+        expected_v.reshape(-1, num_heads, head_dim)[slot_mapping.long()] = value
+        if not torch.allclose(k_cache, expected_k, atol=1e-5, rtol=1e-5):
+            return False, "KV-cache Triton smoke test failed: key cache mismatch"
+        if not torch.allclose(v_cache, expected_v, atol=1e-5, rtol=1e-5):
+            return False, "KV-cache Triton smoke test failed: value cache mismatch"
+    except Exception as exc:
+        msg = str(exc).replace("\n", " ").strip()
+        if len(msg) > 260:
+            msg = msg[:260] + "..."
+        return False, f"KV-cache Triton smoke test failed: {msg}"
+    return True, "ok"
 
 
 class Attention(nn.Module):

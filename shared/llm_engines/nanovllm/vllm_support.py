@@ -4,7 +4,11 @@ from typing import Any, Callable, Optional
 
 _PROBE_CACHE = None
 _WARNED_REQUESTED_VLLM_NOT_SUPPORTED = False
-_TRITON_SMOKE_CACHE = None
+_TRITON_SMOKE_CACHE = {}
+_XPU_TRITON_FALLBACK_CACHE = None
+XPU_TRITON_FALLBACK_ENV = "WGP_XPU_TRITON_FALLBACKS"
+_WINDOWS_DLL_DIRECTORY_HANDLES = []
+_XPU_TRITON_ENV_CACHE = None
 
 
 def _env_enabled(name, default=True):
@@ -20,18 +24,190 @@ def _is_mps_available():
         return False
 
 
-def _check_triton_runtime_smoke():
+def _short_error_message(exc):
+    msg = str(exc).replace("\n", " ").strip()
+    if len(msg) > 260:
+        msg = msg[:260] + "..."
+    return msg
+
+
+def _ensure_windows_intel_runtime_dll_dirs() -> None:
+    if os.name != "nt" or _WINDOWS_DLL_DIRECTORY_HANDLES:
+        return
+    import sys
+
+    candidates = [
+        os.path.join(sys.prefix, "Library", "bin"),
+        os.path.join(sys.prefix, "Library", "lib"),
+    ]
+    for candidate in candidates:
+        if not os.path.isdir(candidate):
+            continue
+        try:
+            _WINDOWS_DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(candidate))
+        except Exception:
+            pass
+
+
+def _clean_tool_path(raw_path):
+    if not raw_path:
+        return None
+    return str(raw_path).strip().strip('"')
+
+
+def _normalize_windows_cl_path(path):
+    path = _clean_tool_path(path)
+    if not path:
+        return None
+    if os.name == "nt" and os.path.basename(path).lower() in ("cl", "cl.exe"):
+        return os.path.join(os.path.dirname(path), "cl.EXE")
+    return path
+
+
+def _which_tool(*names):
+    import shutil
+
+    for name in names:
+        candidate = _clean_tool_path(name)
+        if not candidate:
+            continue
+        if os.path.isfile(candidate):
+            return _normalize_windows_cl_path(candidate)
+        found = shutil.which(candidate)
+        if found:
+            return _normalize_windows_cl_path(found)
+    return None
+
+
+def _prepend_windows_path(entry):
+    entry = _clean_tool_path(entry)
+    if not entry or not os.path.isdir(entry):
+        return
+    current = os.environ.get("PATH") or os.environ.get("Path", "")
+    entry_norm = os.path.normcase(os.path.abspath(entry))
+    parts = [part for part in current.split(os.pathsep) if part]
+    for part in parts:
+        try:
+            if os.path.normcase(os.path.abspath(part)) == entry_norm:
+                return
+        except Exception:
+            continue
+    updated = entry + (os.pathsep + current if current else "")
+    os.environ["PATH"] = updated
+    os.environ["Path"] = updated
+
+
+def _is_windows_cl(path):
+    path = _clean_tool_path(path)
+    return os.name == "nt" and bool(path) and os.path.basename(path).lower() in ("cl", "cl.exe")
+
+
+def _setdefault_directory_env(name, path):
+    if os.environ.get(name):
+        return
+    try:
+        path = os.path.abspath(path)
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        return
+    os.environ[name] = path
+
+
+def _configure_xpu_triton_compiler_env():
+    cc = _which_tool(os.environ.get("CC"))
+    cxx = _which_tool(os.environ.get("CXX"))
+    if cc:
+        os.environ["CC"] = cc
+    if cxx:
+        os.environ["CXX"] = cxx
+
+    if not cc:
+        cc = _which_tool("icx", "icpx", "clang", "gcc", "cl")
+        if cc:
+            os.environ["CC"] = cc
+    if not cxx:
+        cxx = _which_tool("icpx", "clang++", "g++", "cl")
+        if cxx:
+            os.environ["CXX"] = cxx
+
+    if os.name == "nt" and _is_windows_cl(cxx or cc):
+        cl_path = _normalize_windows_cl_path(cxx or cc)
+        _prepend_windows_path(os.path.dirname(cl_path))
+        os.environ["CC"] = cl_path
+        os.environ["CXX"] = cl_path
+        cc = cxx = cl_path
+
+    return cc, cxx
+
+
+def _ensure_xpu_triton_runtime_env():
+    global _XPU_TRITON_ENV_CACHE
+    if _XPU_TRITON_ENV_CACHE is not None:
+        return _XPU_TRITON_ENV_CACHE
+
+    _ensure_windows_intel_runtime_dll_dirs()
+    os.environ.setdefault("ONEAPI_DEVICE_SELECTOR", "level_zero:0")
+    os.environ.setdefault("UR_L0_USE_RELAXED_ALLOCATION_LIMITS", "1")
+    os.environ.setdefault("SYCL_CACHE_PERSISTENT", "1")
+    _setdefault_directory_env("SYCL_CACHE_DIR", os.path.join("cache", "sycl-xpu"))
+    _setdefault_directory_env("TRITON_CACHE_DIR", os.path.join("cache", "triton-xpu"))
+
+    cc, cxx = _configure_xpu_triton_compiler_env()
+    if not cc or not cxx:
+        _XPU_TRITON_ENV_CACHE = (
+            False,
+            "No C/C++ compiler is visible through CC, CXX, or PATH; prepare the compiler environment before launching Wan2GP",
+        )
+        return _XPU_TRITON_ENV_CACHE
+
+    if _is_windows_cl(cxx) and (not os.environ.get("INCLUDE") or not os.environ.get("LIB")):
+        _XPU_TRITON_ENV_CACHE = (
+            False,
+            "MSVC cl.exe is visible, but INCLUDE/LIB are not; launch from a Visual Studio Developer Command Prompt or run VsDevCmd before Wan2GP",
+        )
+        return _XPU_TRITON_ENV_CACHE
+
+    _XPU_TRITON_ENV_CACHE = (True, "ok")
+    return _XPU_TRITON_ENV_CACHE
+
+
+def _runtime_device_for_smoke(torch, device_type: str):
+    device_type = str(device_type or "").strip().lower()
+    if device_type == "cuda":
+        if not torch.cuda.is_available():
+            return None, "CUDA is not available"
+        return torch.device("cuda", torch.cuda.current_device()), "ok"
+    if device_type == "xpu":
+        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+            return None, "XPU is not available"
+        index = torch.xpu.current_device() if hasattr(torch.xpu, "current_device") else 0
+        return torch.device("xpu", index), "ok"
+    return None, f"Unsupported Triton smoke device: {device_type}"
+
+
+def _synchronize_runtime_device(torch, device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device=device)
+    elif device.type == "xpu" and hasattr(torch, "xpu"):
+        torch.xpu.synchronize(device)
+
+
+def _check_triton_runtime_smoke(device_type="cuda"):
     global _TRITON_SMOKE_CACHE
-    if _TRITON_SMOKE_CACHE is not None:
-        return _TRITON_SMOKE_CACHE
+    device_type = str(device_type or "cuda").strip().lower()
+    if device_type in _TRITON_SMOKE_CACHE:
+        return _TRITON_SMOKE_CACHE[device_type]
     try:
         import torch
         import triton
         import triton.language as tl
 
-        if not torch.cuda.is_available():
-            _TRITON_SMOKE_CACHE = (False, "CUDA is not available")
-            return _TRITON_SMOKE_CACHE
+        _ensure_windows_intel_runtime_dll_dirs()
+
+        device, device_msg = _runtime_device_for_smoke(torch, device_type)
+        if device is None:
+            _TRITON_SMOKE_CACHE[device_type] = (False, device_msg)
+            return _TRITON_SMOKE_CACHE[device_type]
 
         @triton.jit
         def _smoke_add_one_kernel(x_ptr, y_ptr, n_elements, BLOCK: tl.constexpr):
@@ -43,23 +219,19 @@ def _check_triton_runtime_smoke():
 
         n_elements = 128
         block_size = 128
-        device = torch.device("cuda", torch.cuda.current_device())
         x = torch.arange(n_elements, dtype=torch.float32, device=device)
         y = torch.empty_like(x)
         grid = (triton.cdiv(n_elements, block_size),)
         _smoke_add_one_kernel[grid](x, y, n_elements, BLOCK=block_size)
-        torch.cuda.synchronize(device=device)
+        _synchronize_runtime_device(torch, device)
         if not torch.allclose(y, x + 1.0, atol=1e-5, rtol=1e-5):
-            _TRITON_SMOKE_CACHE = (False, "Triton runtime smoke test failed: incorrect output from smoke kernel")
-            return _TRITON_SMOKE_CACHE
+            _TRITON_SMOKE_CACHE[device_type] = (False, f"Triton {device_type} runtime smoke test failed: incorrect output from smoke kernel")
+            return _TRITON_SMOKE_CACHE[device_type]
     except Exception as exc:
-        msg = str(exc).replace("\n", " ").strip()
-        if len(msg) > 260:
-            msg = msg[:260] + "..."
-        _TRITON_SMOKE_CACHE = (False, f"Triton runtime smoke test failed: {msg}")
-        return _TRITON_SMOKE_CACHE
-    _TRITON_SMOKE_CACHE = (True, "ok")
-    return _TRITON_SMOKE_CACHE
+        _TRITON_SMOKE_CACHE[device_type] = (False, f"Triton {device_type} runtime smoke test failed: {_short_error_message(exc)}")
+        return _TRITON_SMOKE_CACHE[device_type]
+    _TRITON_SMOKE_CACHE[device_type] = (True, "ok")
+    return _TRITON_SMOKE_CACHE[device_type]
 
 
 def _check_triton():
@@ -69,10 +241,89 @@ def _check_triton():
     except Exception as exc:
         return False, f"Triton import failed: {exc}"
     if _env_enabled("WGP_VLLM_TRITON_SMOKE", default=True):
-        smoke_ok, smoke_msg = _check_triton_runtime_smoke()
+        smoke_ok, smoke_msg = _check_triton_runtime_smoke("cuda")
         if not smoke_ok:
             return False, smoke_msg
     return True, "ok"
+
+
+def probe_xpu_triton_fallbacks(force=False):
+    global _XPU_TRITON_FALLBACK_CACHE
+    if _XPU_TRITON_FALLBACK_CACHE is not None and not force:
+        return copy.deepcopy(_XPU_TRITON_FALLBACK_CACHE)
+
+    checks = {}
+    kernels = {
+        "rmsnorm": False,
+        "kv_cache": False,
+    }
+
+    if not _env_enabled(XPU_TRITON_FALLBACK_ENV, default=True):
+        result = {
+            "supported": False,
+            "kernels": kernels,
+            "checks": {"disabled": {"ok": False, "message": f"disabled by {XPU_TRITON_FALLBACK_ENV}"}},
+        }
+        _XPU_TRITON_FALLBACK_CACHE = result
+        return copy.deepcopy(result)
+
+    try:
+        import torch
+    except Exception as exc:
+        result = {
+            "supported": False,
+            "kernels": kernels,
+            "checks": {"torch": {"ok": False, "message": f"Torch import failed: {exc}"}},
+        }
+        _XPU_TRITON_FALLBACK_CACHE = result
+        return copy.deepcopy(result)
+
+    device, device_msg = _runtime_device_for_smoke(torch, "xpu")
+    if device is None:
+        result = {
+            "supported": False,
+            "kernels": kernels,
+            "checks": {"xpu": {"ok": False, "message": device_msg}},
+        }
+        _XPU_TRITON_FALLBACK_CACHE = result
+        return copy.deepcopy(result)
+
+    compiler_ok, compiler_msg = _ensure_xpu_triton_runtime_env()
+    checks["xpu_triton_env"] = {"ok": compiler_ok, "message": compiler_msg}
+    if not compiler_ok:
+        result = {
+            "supported": False,
+            "kernels": kernels,
+            "checks": checks,
+        }
+        _XPU_TRITON_FALLBACK_CACHE = result
+        return copy.deepcopy(result)
+
+    triton_ok, triton_msg = _check_triton_runtime_smoke("xpu")
+    checks["triton_xpu"] = {"ok": triton_ok, "message": triton_msg}
+
+    if triton_ok:
+        try:
+            from shared.llm_engines.nanovllm.layers.layernorm import smoke_triton_rmsnorm
+            from shared.llm_engines.nanovllm.layers.attention import smoke_triton_kv_cache
+        except Exception as exc:
+            checks["kernel_imports"] = {"ok": False, "message": f"Kernel smoke imports failed: {_short_error_message(exc)}"}
+        else:
+            rmsnorm_ok, rmsnorm_msg = smoke_triton_rmsnorm(device)
+            checks["rmsnorm"] = {"ok": rmsnorm_ok, "message": rmsnorm_msg}
+            kernels["rmsnorm"] = bool(rmsnorm_ok)
+
+            kv_cache_ok, kv_cache_msg = smoke_triton_kv_cache(device)
+            checks["kv_cache"] = {"ok": kv_cache_ok, "message": kv_cache_msg}
+            kernels["kv_cache"] = bool(kv_cache_ok)
+
+    result = {
+        "supported": any(kernels.values()),
+        "kernels": kernels,
+        "checks": checks,
+    }
+    _XPU_TRITON_FALLBACK_CACHE = result
+    return copy.deepcopy(result)
 
 
 def _check_flash_attention_2():

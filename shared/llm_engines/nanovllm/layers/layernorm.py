@@ -18,6 +18,10 @@ def configure_layernorm_safe_legacy_kernels(enabled: bool) -> None:
     _USE_TRITON_RMSNORM = (not enabled) and triton is not None and tl is not None
 
 
+def _is_triton_runtime_device(device: torch.device) -> bool:
+    return device.type in ("cuda", "xpu")
+
+
 if triton is not None:
     @triton.jit
     def _rmsnorm_kernel(
@@ -79,7 +83,7 @@ class RMSNorm(nn.Module):
     def _can_use_triton(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> bool:
         if not self.use_triton_rmsnorm or triton is None or tl is None:
             return False
-        if not x.is_cuda or self.weight.device.type != "cuda":
+        if not _is_triton_runtime_device(x.device) or self.weight.device.type != x.device.type:
             return False
         if x.stride(-1) != 1 or self.weight.stride(-1) != 1:
             return False
@@ -174,3 +178,39 @@ class RMSNorm(nn.Module):
         if self._can_use_triton(x, residual):
             return self._triton_add_rms_forward(x, residual)
         return self._fallback_add_rms_forward(x, residual)
+
+
+def smoke_triton_rmsnorm(device: torch.device) -> tuple[bool, str]:
+    if triton is None or tl is None:
+        return False, "Triton import is not available"
+    device = torch.device(device)
+    if not _is_triton_runtime_device(device):
+        return False, f"Unsupported Triton device type: {device.type}"
+    try:
+        module = RMSNorm(16).to(device)
+        module.use_triton_rmsnorm = True
+        x = torch.randn(4, 16, device=device, dtype=torch.float32)
+        residual = torch.randn(4, 16, device=device, dtype=torch.float32)
+
+        y = module._triton_rms_forward(x)
+        expected = module._fallback_rms_forward(x)
+        y_add, residual_out = module._triton_add_rms_forward(x, residual)
+        expected_add, expected_residual = module._fallback_add_rms_forward(x, residual)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "xpu" and hasattr(torch, "xpu"):
+            torch.xpu.synchronize(device)
+
+        if not torch.allclose(y, expected, atol=1e-4, rtol=1e-4):
+            return False, "RMSNorm Triton smoke test failed: forward mismatch"
+        if not torch.allclose(y_add, expected_add, atol=1e-4, rtol=1e-4):
+            return False, "RMSNorm Triton smoke test failed: residual forward mismatch"
+        if not torch.allclose(residual_out, expected_residual, atol=1e-4, rtol=1e-4):
+            return False, "RMSNorm Triton smoke test failed: residual output mismatch"
+    except Exception as exc:
+        msg = str(exc).replace("\n", " ").strip()
+        if len(msg) > 260:
+            msg = msg[:260] + "..."
+        return False, f"RMSNorm Triton smoke test failed: {msg}"
+    return True, "ok"

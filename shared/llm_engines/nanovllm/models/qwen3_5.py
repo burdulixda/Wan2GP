@@ -71,6 +71,23 @@ def _safe_legacy_kernels_enabled(config) -> bool:
     return bool(getattr(config, "_prompt_enhancer_safe_legacy", False))
 
 
+def _xpu_triton_fallbacks(config) -> dict:
+    fallbacks = getattr(config, "_prompt_enhancer_xpu_triton_fallbacks", None)
+    return fallbacks if isinstance(fallbacks, dict) else {}
+
+
+def _triton_rmsnorm_enabled(config) -> bool:
+    if not _safe_legacy_kernels_enabled(config):
+        return True
+    return bool(_xpu_triton_fallbacks(config).get("rmsnorm", False))
+
+
+def _triton_kv_cache_enabled(config) -> bool:
+    if not _safe_legacy_kernels_enabled(config):
+        return True
+    return bool(_xpu_triton_fallbacks(config).get("kv_cache", False))
+
+
 def _get_tp_size() -> int:
     if dist.is_available() and dist.is_initialized():
         return dist.get_world_size()
@@ -568,11 +585,12 @@ class Qwen3_5Block(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
         safe_legacy_kernels = _safe_legacy_kernels_enabled(config)
+        use_triton_rmsnorm = _triton_rmsnorm_enabled(config)
         self.layer_type = str(config.layer_types[layer_idx])
         self.attn_norm = RMSNorm(int(config.hidden_size), eps=float(config.rms_norm_eps))
         self.post_attention_norm = RMSNorm(int(config.hidden_size), eps=float(config.rms_norm_eps))
-        self.attn_norm.use_triton_rmsnorm = not safe_legacy_kernels
-        self.post_attention_norm.use_triton_rmsnorm = not safe_legacy_kernels
+        self.attn_norm.use_triton_rmsnorm = use_triton_rmsnorm
+        self.post_attention_norm.use_triton_rmsnorm = use_triton_rmsnorm
         self.ffn_gate = ColumnParallelLinear(int(config.hidden_size), int(config.intermediate_size), bias=False)
         self.ffn_up = ColumnParallelLinear(int(config.hidden_size), int(config.intermediate_size), bias=False)
         self.ffn_gate_up = None
@@ -616,11 +634,11 @@ class Qwen3_5Block(nn.Module):
             if safe_legacy_kernels:
                 self.attn.flash_attn_varlen_func = None
                 self.attn.flash_attn_with_kvcache = None
-                self.attn.use_triton_kv_cache = False
+                self.attn.use_triton_kv_cache = _triton_kv_cache_enabled(config)
             self.attn_q_norm = RMSNorm(self.head_dim, eps=float(config.rms_norm_eps))
             self.attn_k_norm = RMSNorm(self.head_dim, eps=float(config.rms_norm_eps))
-            self.attn_q_norm.use_triton_rmsnorm = not safe_legacy_kernels
-            self.attn_k_norm.use_triton_rmsnorm = not safe_legacy_kernels
+            self.attn_q_norm.use_triton_rmsnorm = use_triton_rmsnorm
+            self.attn_k_norm.use_triton_rmsnorm = use_triton_rmsnorm
             self._flash_attn_varlen_func = None if safe_legacy_kernels else _DEFAULT_FLASH_ATTN_VARLEN_FUNC
         else:
             self._short_convolution_cls = None if safe_legacy_kernels else _DEFAULT_SHORT_CONVOLUTION
@@ -1049,12 +1067,12 @@ class Qwen3_5ForCausalLM(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.config = config
-        safe_legacy_kernels = _safe_legacy_kernels_enabled(config)
+        use_triton_rmsnorm = _triton_rmsnorm_enabled(config)
         self.token_embd = nn.Embedding(int(config.vocab_size), int(config.hidden_size))
         self.rotary_emb = Qwen3_5TextRotaryEmbedding(config)
         self.blk = nn.ModuleList([Qwen3_5Block(config, idx) for idx in range(int(config.num_hidden_layers))])
         self.output_norm = RMSNorm(int(config.hidden_size), eps=float(config.rms_norm_eps))
-        self.output_norm.use_triton_rmsnorm = not safe_legacy_kernels
+        self.output_norm.use_triton_rmsnorm = use_triton_rmsnorm
         self.output = nn.Linear(int(config.hidden_size), int(config.vocab_size), bias=False)
 
     @property

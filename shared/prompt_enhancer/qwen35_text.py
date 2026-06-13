@@ -17,6 +17,7 @@ from shared.llm_engines.nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM, clear
 from shared.llm_engines.nanovllm.utils.context import reset_context
 from shared.llm_engines.nanovllm.vllm_support import (
     NanoVllmTextEngine,
+    probe_xpu_triton_fallbacks,
     resolve_lm_decoder_engine,
 )
 from shared.accelerator import empty_cache, get_accelerator_type, get_preferred_device, is_xpu_available, synchronize
@@ -560,6 +561,21 @@ def _use_legacy_cuda_runner_prompt_enhancer(model) -> bool:
     return _has_legacy_text_runtime_device()
 
 
+def _resolve_xpu_triton_fallbacks(safe_legacy_mode: bool) -> dict:
+    if not safe_legacy_mode or not _is_xpu_requested_and_available():
+        return {}
+    probe = probe_xpu_triton_fallbacks()
+    kernels = probe.get("kernels", {}) if isinstance(probe, dict) else {}
+    enabled = {
+        name: True
+        for name, is_enabled in kernels.items()
+        if bool(is_enabled)
+    }
+    if enabled:
+        print(f"[Qwen3.5VL][XPU] Enabled Triton fallback kernels: {', '.join(sorted(enabled))}")
+    return enabled
+
+
 def _get_assistant_graph_pool_handle(model, usage_mode: str | None, enable_cudagraph: bool):
     if usage_mode != "assistant" or not enable_cudagraph or not _supports_cuda_graph_pool():
         return None
@@ -760,10 +776,12 @@ def _load_local_text_model(
     preprocess_sd=None,
     default_dtype: torch.dtype = torch.float16,
     safe_legacy_mode: bool = False,
+    xpu_triton_fallbacks: dict | None = None,
     materialize_source_tensors: bool = True,
 ):
     config = _load_text_config(config_path)
     config._prompt_enhancer_safe_legacy = bool(safe_legacy_mode)
+    config._prompt_enhancer_xpu_triton_fallbacks = dict(xpu_triton_fallbacks or {})
     with torch.device("meta"):
         model = Qwen3_5ForCausalLM(config)
 
@@ -986,6 +1004,7 @@ def load_qwen35_text_prompt_enhancer(
         runtime_model_path=runtime_model_path,
     )
     safe_legacy_mode = not allow_vllm_kernels
+    xpu_triton_fallbacks = _resolve_xpu_triton_fallbacks(safe_legacy_mode)
 
     if not os.path.isfile(model_path):
         raise FileNotFoundError(f"Qwen3.5 text checkpoint not found: {model_path}")
@@ -1005,6 +1024,7 @@ def load_qwen35_text_prompt_enhancer(
         preprocess_sd=preprocess_sd,
         default_dtype=default_dtype,
         safe_legacy_mode=safe_legacy_mode,
+        xpu_triton_fallbacks=xpu_triton_fallbacks,
         materialize_source_tensors=backend != enhancer_quantization_GGUF,
     )
     if backend == enhancer_quantization_QUANTO_INT8 and spec.get("text_int8_tie_word_embeddings", False):
@@ -1045,6 +1065,7 @@ def load_qwen35_text_prompt_enhancer(
     model._prompt_enhancer_engine_name = engine_name
     model._prompt_enhancer_enable_cudagraph = bool(enable_cudagraph and engine_name in ("cg", "vllm"))
     model._prompt_enhancer_allow_vllm_kernels = bool(allow_vllm_kernels)
+    model._prompt_enhancer_xpu_triton_fallbacks = dict(xpu_triton_fallbacks)
     model._prompt_enhancer_vllm_model_path = runtime_model_path
     model._prompt_enhancer_vllm_engine = None
     model._prompt_enhancer_vllm_mode = None
