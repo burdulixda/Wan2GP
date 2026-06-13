@@ -29,6 +29,10 @@ is_mps = sys.platform == 'darwin' and hasattr(torch.backends, 'mps') and torch.b
 if is_mps:
     from shared.mps.device_patch import apply_mps_patch
     apply_mps_patch()
+else:
+    from shared.xpu.device_patch import should_apply_xpu_patch, apply_xpu_patch
+    if should_apply_xpu_patch():
+        apply_xpu_patch()
 
 import time
 import threading

@@ -1,0 +1,1 @@
+"""Intel XPU compatibility helpers."""
