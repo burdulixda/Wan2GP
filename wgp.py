@@ -3280,7 +3280,7 @@ compile = server_config.get("compile", "")
 if args.compile:
     compile="transformer"
     lock_ui_compile = True
-if is_mps: compile = ""
+if is_mps or str(processing_device).lower().split(":", 1)[0] == "xpu": compile = ""
 boost = server_config.get("boost", 1)
 enable_int8_kernels = server_config.get("enable_int8_kernels", 1)
 apply_int8_kernel_setting(enable_int8_kernels)

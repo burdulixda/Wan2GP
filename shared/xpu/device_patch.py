@@ -112,8 +112,8 @@ def apply_xpu_patch() -> bool:
         _cuda.CudaError = RuntimeError
 
     _patch_autocast(_torch)
-    _patch_device_moves(_torch, preferred_device)
-    _patch_tensor_creation(_torch, preferred_device)
+    default_device_holder = _patch_device_moves(_torch, preferred_device)
+    _patch_tensor_creation(_torch, preferred_device, default_device_holder)
 
     print("[XPU Patch] Applied successfully")
     if total_memory:
@@ -232,12 +232,13 @@ def _patch_autocast(torch_module) -> None:
         torch_module.cuda.amp = _PatchedAMP
 
 
-def _patch_device_moves(torch_module, preferred_device) -> None:
+def _patch_device_moves(torch_module, preferred_device) -> dict:
     orig_tensor_to = torch_module.Tensor.to
     orig_module_to = torch_module.nn.Module.to
     orig_load = torch_module.load
     orig_set_default_device = torch_module.set_default_device
     orig_generator = torch_module.Generator
+    default_device_holder = {"device": torch_module.device("cpu")}
 
     def patched_tensor_cuda(self, device=None, *args, **kwargs):
         return orig_tensor_to(self, _replace_cuda_device(torch_module, device or "cuda", preferred_device), *args, **kwargs)
@@ -265,7 +266,9 @@ def _patch_device_moves(torch_module, preferred_device) -> None:
         return orig_load(*args, **kwargs)
 
     def patched_set_default_device(device):
-        return orig_set_default_device(_replace_cuda_device(torch_module, device, preferred_device))
+        device = _replace_cuda_device(torch_module, device, preferred_device)
+        default_device_holder["device"] = device
+        return orig_set_default_device(device)
 
     class _PatchedGenerator(orig_generator):
         def __new__(cls, device=None):
@@ -281,9 +284,10 @@ def _patch_device_moves(torch_module, preferred_device) -> None:
     torch_module.load = patched_load
     torch_module.set_default_device = patched_set_default_device
     torch_module.Generator = _PatchedGenerator
+    return default_device_holder
 
 
-def _patch_tensor_creation(torch_module, preferred_device) -> None:
+def _patch_tensor_creation(torch_module, preferred_device, default_device_holder) -> None:
     for fn_name in (
         "zeros",
         "ones",
@@ -313,7 +317,7 @@ def _patch_tensor_creation(torch_module, preferred_device) -> None:
                 if "device" in kwargs:
                     kwargs["device"] = _replace_cuda_device(torch_module, kwargs["device"], preferred_device)
                 elif name != "from_numpy":
-                    default_device = torch_module.get_default_device()
+                    default_device = default_device_holder["device"]
                     if isinstance(default_device, torch_module.device) and default_device.type == "xpu":
                         kwargs["device"] = default_device
                 return orig(*args, **kwargs)
