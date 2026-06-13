@@ -3,13 +3,14 @@
 # I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
 # Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 import math
+from functools import wraps
 import torch
-import torch.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
+from shared.accelerator import get_accelerator_type
 from shared.attention import pay_attention
 
 
@@ -32,18 +33,38 @@ def restore_latent_shape(latent):
     return latent.reshape(latent.shape[0], -1, latent.shape[-1] )
 
 
-@amp.autocast('cuda', enabled=False)
+def _rope_real_dtype(device=None):
+    return torch.float32 if get_accelerator_type(device) == "xpu" else torch.float64
+
+
+def _autocast_device_from_args(args, kwargs):
+    for value in list(args) + list(kwargs.values()):
+        if torch.is_tensor(value):
+            return get_accelerator_type(value.device)
+    return get_accelerator_type()
+
+
+def _no_autocast(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with torch.amp.autocast(_autocast_device_from_args(args, kwargs), enabled=False):
+            return func(*args, **kwargs)
+    return wrapper
+
+
+@_no_autocast
 def rope_params(max_seq_len, dim, theta=10000, freqs_scaling=1.0):
     assert dim % 2 == 0
-    pos =  torch.arange(max_seq_len)
-    freqs = 1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim))
+    rope_dtype = _rope_real_dtype()
+    pos = torch.arange(max_seq_len, dtype=rope_dtype)
+    freqs = 1.0 / torch.pow(theta, torch.arange(0, dim, 2, dtype=rope_dtype).div(dim))
     freqs = freqs_scaling * freqs
     freqs = torch.outer(pos, freqs)
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
 
-@amp.autocast('cuda', enabled=False)
+@_no_autocast
 def rope_params_audio_real(max_seq_len, head_dim, rotary_dim, theta=10000, freqs_scaling=1.0):
     assert rotary_dim % 2 == 0
     assert rotary_dim <= head_dim
@@ -60,7 +81,7 @@ def rope_params_audio_real(max_seq_len, head_dim, rotary_dim, theta=10000, freqs
     return cos, sin
 
     
-@amp.autocast('cuda', enabled=False)
+@_no_autocast
 def rope_apply_1d(x, grid_sizes, freqs):
     output = []
     for i, (l,) in enumerate(grid_sizes.tolist()):
@@ -80,8 +101,9 @@ def rope_apply_1d(x, grid_sizes, freqs):
             n, c = x.size(2), x.size(3) // 2
             c_rope = freqs.shape[1]
             assert c_rope <= c, "RoPE dimensions cannot exceed half of hidden size"
+            rope_dtype = _rope_real_dtype(x_prefix.device)
             x_i = torch.view_as_complex(
-                x_prefix.to(torch.float64).reshape(seq_len, n, -1, 2)
+                x_prefix.to(rope_dtype).reshape(seq_len, n, -1, 2)
             )
             x_i_rope = x_i[:, :, :c_rope] * freqs[:seq_len, None, :]
             x_i_passthrough = x_i[:, :, c_rope:]
@@ -94,7 +116,7 @@ def rope_apply_1d(x, grid_sizes, freqs):
         output.append(x_i_full.to(x.dtype))
     return torch.stack(output)
 
-@amp.autocast('cuda', enabled=False)
+@_no_autocast
 def rope_apply_3d(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2
 
@@ -107,7 +129,8 @@ def rope_apply_3d(x, grid_sizes, freqs):
         seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
+        rope_dtype = _rope_real_dtype(x.device)
+        x_i = torch.view_as_complex(x[i, :seq_len].to(rope_dtype).reshape(
             seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
@@ -124,7 +147,7 @@ def rope_apply_3d(x, grid_sizes, freqs):
         output.append(x_i)
     return torch.stack(output).bfloat16()
 
-@amp.autocast('cuda', enabled=False)
+@_no_autocast
 def rope_apply(x, grid_sizes, freqs):
     x_ndim = grid_sizes.shape[-1]
     if isinstance(freqs, tuple):
@@ -651,8 +674,7 @@ class WanModel(ModelMixin, ConfigMixin):
     ):
 
         # params
-        ## need to change!
-        device = "cuda" # next(self.patch_embedding.parameters()).device
+        device = x[0].device if x else next(self.patch_embedding.parameters()).device
         if isinstance(freqs, tuple):
             freqs = tuple(item.to(device) for item in freqs) 
         else:

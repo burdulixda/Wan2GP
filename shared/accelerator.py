@@ -174,3 +174,33 @@ def get_device_total_memory_mb(device=None) -> float:
     properties = _device_properties(device)
     total_memory = getattr(properties, "total_memory", 0) if properties is not None else 0
     return total_memory / 1048576 if total_memory else 0
+
+
+def get_device_memory_allocated(device=None) -> int:
+    accelerator = get_accelerator_type(device)
+    index = _device_index(get_preferred_device(device))
+    try:
+        if accelerator == "cuda" and torch.cuda.is_available():
+            return int(torch.cuda.memory_allocated(index))
+        if accelerator == "xpu" and is_xpu_available() and hasattr(torch.xpu, "memory_allocated"):
+            return int(torch.xpu.memory_allocated(0 if index is None else index))
+        if accelerator == "mps" and is_mps_available() and hasattr(torch.mps, "current_allocated_memory"):
+            return int(torch.mps.current_allocated_memory())
+    except Exception:
+        return 0
+    return 0
+
+
+def get_device_memory_reserved(device=None) -> int:
+    accelerator = get_accelerator_type(device)
+    index = _device_index(get_preferred_device(device))
+    try:
+        if accelerator == "cuda" and torch.cuda.is_available():
+            return int(torch.cuda.memory_reserved(index))
+        if accelerator == "xpu" and is_xpu_available() and hasattr(torch.xpu, "memory_reserved"):
+            return int(torch.xpu.memory_reserved(0 if index is None else index))
+        if accelerator == "mps" and is_mps_available() and hasattr(torch.mps, "driver_allocated_memory"):
+            return int(torch.mps.driver_allocated_memory())
+    except Exception:
+        return 0
+    return 0

@@ -17,6 +17,12 @@ from .ovi.modules.fusion import FusionModel
 import json
 from mmgp import offload
 from shared.utils.loras_mutipliers import update_loras_slists, get_model_switch_steps
+from shared.accelerator import (
+    get_accelerator_type,
+    get_device_memory_allocated,
+    get_device_memory_reserved,
+    get_preferred_device,
+)
 
 def init_fusion_score_model_ovi():
     config_root = os.path.join("models", "wan", "ovi", "configs")
@@ -49,7 +55,7 @@ def init_mmaudio_vae():
 
 class OviFusionEngine:
     def __init__(self,  
-                device="cuda",
+                device=None,
                 model_filename = None, 
                 text_encoder_filename = None, 
                 VAE_dtype = torch.bfloat16,
@@ -65,7 +71,7 @@ class OviFusionEngine:
         self.last_audio = None
 
         # Load fusion model
-        self.device = device
+        self.device = get_preferred_device(device)
         self.target_dtype = torch.bfloat16 # dtype, wont work with torch.float16
         model, video_config, audio_config = init_fusion_score_model_ovi()
         # offload.load_model_data(model, "c:/temp/model_960x960.safetensors")
@@ -87,7 +93,7 @@ class OviFusionEngine:
         self.vae_stride = (4, 16, 16)
         vae_checkpoint = "Wan2.2_VAE.safetensors"
         self.vae = Wan2_2_VAE( vae_pth=fl.locate_file(vae_checkpoint), dtype= VAE_dtype, device="cpu")
-        self.vae.device = self.device # need to set to cuda so that vae buffers are properly moved (although the rest will stay in the CPU)
+        self.vae.device = self.device # need to set to the accelerator so VAE buffers are properly moved (although the rest will stay in the CPU)
         self.vae.model.requires_grad_(False).eval()
 
         vae_model_audio = init_mmaudio_vae()
@@ -122,7 +128,7 @@ class OviFusionEngine:
         self.audio_latent_length = 157
         self.video_latent_length = 31
 
-        logging.info(f"OVI Fusion Engine initialized, GPU VRAM allocated: {torch.cuda.memory_allocated(device)/1e9:.2f} GB, reserved: {torch.cuda.memory_reserved(device)/1e9:.2f} GB")
+        logging.info(f"OVI Fusion Engine initialized, GPU VRAM allocated: {get_device_memory_allocated(self.device)/1e9:.2f} GB, reserved: {get_device_memory_reserved(self.device)/1e9:.2f} GB")
 
 
     @torch.no_grad()
@@ -248,7 +254,7 @@ class OviFusionEngine:
         }
 
         # Sampling loop
-        with torch.amp.autocast('cuda', enabled=self.target_dtype != torch.float32, dtype=self.target_dtype):
+        with torch.amp.autocast(get_accelerator_type(self.device), enabled=self.target_dtype != torch.float32, dtype=self.target_dtype):
             for i, (t_v, t_a) in tqdm(enumerate(zip(timesteps_video, timesteps_audio)), total=min(len(timesteps_video), len(timesteps_audio))):
                 timestep_input = torch.full((1,), t_v, device=self.device)
                 kwargs.update({

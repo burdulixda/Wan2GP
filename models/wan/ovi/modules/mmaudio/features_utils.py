@@ -8,6 +8,7 @@ from einops import rearrange
 from open_clip import create_model_from_pretrained
 from torchvision.transforms import Normalize
 
+from shared.accelerator import get_accelerator_type
 from .ext.autoencoder import AutoEncoderModule
 from .ext.autoencoder.distributions import DiagonalGaussianDistribution
 from .ext.mel_converter import get_mel_converter
@@ -85,7 +86,7 @@ class FeaturesUtils(nn.Module):
 
     @torch.no_grad()
     def wrapped_decode(self, z):
-        with torch.amp.autocast('cuda', dtype=self.dtype):
+        with torch.amp.autocast(get_accelerator_type(self.device), dtype=self.dtype):
             mel_decoded = self.decode(z)
             audio = self.vocode(mel_decoded)
 
@@ -93,7 +94,7 @@ class FeaturesUtils(nn.Module):
 
     @torch.no_grad()
     def wrapped_encode(self, audio):
-        with torch.amp.autocast('cuda', dtype=self.dtype):
+        with torch.amp.autocast(get_accelerator_type(self.device), dtype=self.dtype):
             dist = self.encode_audio(audio)
 
             return dist.mean
