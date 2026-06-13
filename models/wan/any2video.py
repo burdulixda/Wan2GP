@@ -48,7 +48,7 @@ from shared.utils.text_encoder_cache import TextEncoderCache
 from shared.utils.self_refiner import PnPHandler, create_self_refiner_handler
 from mmgp import safetensors2
 from shared.utils import files_locator as fl 
-from shared.accelerator import get_preferred_device
+from shared.accelerator import empty_cache, get_preferred_device
 from .scail2 import prepare_scail2_conditioning
 
 WAN_USE_FP32_ROPE_FREQS = True
@@ -1060,7 +1060,7 @@ class WanAny2V:
                     lynx_ref_buffer, lynx_ref_buffer_uncond = self.encode_reference_images([lynx_ref], tile_size=VAE_tile_size, any_guidance= any_guidance_at_all, enable_loras = False)
                     lynx_ref = None
                 gc.collect()
-                torch.cuda.empty_cache()
+                empty_cache(self.device)
                 kwargs["lynx_ip_scale"] = control_scale_alt
                 kwargs["lynx_ref_scale"] = control_scale_alt
 
@@ -1078,7 +1078,7 @@ class WanAny2V:
                 standin_ref = face_processor.process(image_ref, remove_bg = vace)
                 face_processor = None
                 gc.collect()
-                torch.cuda.empty_cache()
+                empty_cache(self.device)
                 standin_freqs = get_nd_rotary_pos_embed((-1, int(height/16), int(width/16) ), (-1, int(height/16 + standin_ref.height/16), int(width/16 + standin_ref.width/16) )) 
                 standin_ref = self.vae.encode([ convert_image_to_tensor(standin_ref).unsqueeze(1) ], VAE_tile_size)[0].unsqueeze(0)
                 kwargs.update({ "standin_freqs": standin_freqs, "standin_ref": standin_ref, }) 
@@ -1208,7 +1208,7 @@ class WanAny2V:
         def clear():
             clear_caches()
             gc.collect()
-            torch.cuda.empty_cache()
+            empty_cache(self.device)
             return None
 
         if sample_scheduler != None:
@@ -1229,7 +1229,7 @@ class WanAny2V:
             audio_momentumbuffer = MomentumBuffer(apg_momentum) 
         input_frames = input_frames2 = input_masks =input_masks2 = input_video = input_ref_images = input_ref_masks = pre_video_frame = None
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache(self.device)
         # denoising
         trans = self.model
         if self_refiner_setting > 0:
