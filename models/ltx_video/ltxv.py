@@ -38,6 +38,14 @@ from .utils.skip_layer_strategy import SkipLayerStrategy
 from .models.autoencoders.latent_upsampler import LatentUpsampler
 from .pipelines import crf_compressor
 import cv2
+from shared.accelerator import (
+    get_accelerator_type,
+    get_device_total_memory_mb,
+    get_preferred_device,
+    is_mps_available,
+    is_xpu_available,
+    manual_seed_all,
+)
 from shared.utils import files_locator as fl 
 
 MAX_HEIGHT = 720
@@ -48,17 +56,18 @@ logger = logging.get_logger("LTX-Video")
 
 
 def get_total_gpu_memory():
-    if torch.cuda.is_available():
-        total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        return total_memory
-    return 0
+    return get_device_total_memory_mb(get_device()) / 1024
 
 
 def get_device():
-    if torch.cuda.is_available():
-        return "cuda"
-    elif torch.backends.mps.is_available():
-        return "mps"
+    preferred_device = get_preferred_device()
+    accelerator = get_accelerator_type(preferred_device)
+    if accelerator == "cuda" and torch.cuda.is_available():
+        return preferred_device
+    if accelerator == "xpu" and is_xpu_available():
+        return preferred_device
+    if accelerator == "mps" and is_mps_available():
+        return preferred_device
     return "cpu"
 
 
@@ -138,10 +147,7 @@ def seed_everething(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-    if torch.backends.mps.is_available():
-        torch.mps.manual_seed(seed)
+    manual_seed_all(seed)
 
 
 class LTXV:

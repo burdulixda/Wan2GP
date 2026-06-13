@@ -1079,7 +1079,7 @@ class LTXVideoPipeline(DiffusionPipeline):
                 [negative_prompt_embeds, prompt_embeds], dim=0
             )
             prompt_attention_mask_batch = torch.cat(
-                [negative_prompt_attention_mask.to("cuda"), prompt_attention_mask], dim=0
+                [negative_prompt_attention_mask.to(device), prompt_attention_mask.to(device)], dim=0
             )
         if do_spatio_temporal_guidance:
             prompt_embeds_batch = torch.cat([prompt_embeds_batch, prompt_embeds], dim=0)
