@@ -35,6 +35,12 @@ from packaging import version
 from PIL import Image
 from torchvision import io, transforms
 from torchvision.transforms import InterpolationMode
+from shared.accelerator import (
+    get_accelerator_type,
+    get_preferred_device,
+    is_mps_available,
+    is_xpu_available,
+)
 from shared.utils.video_decode import decode_video_frame_indices_ffmpeg, probe_video_stream_metadata
 
 from diffusers import ModelMixin, ConfigMixin
@@ -74,6 +80,18 @@ FPS_MAX_FRAMES = 16
 MAX_NUM_WORKERS_FETCH_VIDEO = 8
 
 MODEL_SEQ_LEN = int(float(os.environ.get('MODEL_SEQ_LEN', 128000)))
+
+
+def _default_device() -> torch.device:
+    preferred_device = get_preferred_device()
+    accelerator = get_accelerator_type(preferred_device)
+    if accelerator == "cuda" and torch.cuda.is_available():
+        return torch.device(preferred_device)
+    if accelerator == "xpu" and is_xpu_available():
+        return torch.device(preferred_device)
+    if accelerator == "mps" and is_mps_available():
+        return torch.device(preferred_device)
+    return torch.device("cpu")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2464,12 +2482,14 @@ class MLLMEncoder(ModelMixin, ConfigMixin):
 
         return None
 
-    def load_qwen_model(self, device="cuda", dtype=torch.bfloat16):
+    def load_qwen_model(self, device=None, dtype=torch.bfloat16):
         """Load the Qwen VL model and processor. Call this after from_pretrained."""
         from transformers import AutoProcessor, AutoConfig
 
         qwen_path = self._resolve_qwen_path()
         processor_path = self._resolve_processor_path()
+        if device is None:
+            device = _default_device()
         device_map = str(device) if isinstance(device, torch.device) else device
         if isinstance(device_map, str) and device_map not in {
             "auto",

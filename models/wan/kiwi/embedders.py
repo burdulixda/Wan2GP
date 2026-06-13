@@ -8,6 +8,7 @@ import torchvision.transforms.functional as TF
 from PIL import Image, ImageOps
 
 from mmgp import offload
+from shared.accelerator import empty_cache
 from shared.utils import files_locator as fl
 from shared.utils.utils import convert_tensor_to_image
 
@@ -52,7 +53,7 @@ def _load_embedder(
     return model
 
 
-def _release_model(model):
+def _release_model(model, device: torch.device | None = None):
     if model is None:
         return
     try:
@@ -61,8 +62,7 @@ def _release_model(model):
         pass
     del model
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    empty_cache(device)
 
 
 @torch.no_grad()
@@ -106,7 +106,7 @@ def build_kiwi_conditions(
                 source_cond = source_cond.expand(batch_size, -1, -1, -1, -1)
             result["source_condition"] = source_cond
         finally:
-            _release_model(source_embedder)
+            _release_model(source_embedder, device=device)
 
     ref_image = None
     if ref_images is not None:
@@ -136,6 +136,6 @@ def build_kiwi_conditions(
                 ref_cond = ref_cond.expand(batch_size, -1, -1, -1, -1)
             result["ref_condition"] = ref_cond
         finally:
-            _release_model(ref_embedder)
+            _release_model(ref_embedder, device=device)
 
     return result

@@ -12,8 +12,27 @@ import torch
 from PIL import Image
 from mmgp import offload
 
+from shared.accelerator import (
+    empty_cache,
+    get_accelerator_type,
+    get_preferred_device,
+    is_mps_available,
+    is_xpu_available,
+)
 from shared.utils import files_locator as fl
 from shared.utils.utils import convert_tensor_to_image
+
+
+def _default_device() -> torch.device:
+    preferred_device = get_preferred_device()
+    accelerator = get_accelerator_type(preferred_device)
+    if accelerator == "cuda" and torch.cuda.is_available():
+        return torch.device(preferred_device)
+    if accelerator == "xpu" and is_xpu_available():
+        return torch.device(preferred_device)
+    if accelerator == "mps" and is_mps_available():
+        return torch.device(preferred_device)
+    return torch.device("cpu")
 
 
 class KiwiMLLMContextEncoder:
@@ -22,13 +41,14 @@ class KiwiMLLMContextEncoder:
         mllm_root_folder: str = "kiwi_mllm_encoder_instruct_reference",
         qwen_weights_path: Optional[str] = None,
         any_ref: bool = True,
-        device: torch.device = torch.device("cuda"),
+        device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.bfloat16,
         offload_after_encode: bool = True,
     ):
         self.mllm_root_folder = mllm_root_folder
         self.qwen_weights_path = qwen_weights_path
         self.any_ref = bool(any_ref)
+        device = _default_device() if device is None else device
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.dtype = dtype
         self.offload_after_encode = offload_after_encode
@@ -276,8 +296,7 @@ class KiwiMLLMContextEncoder:
                 pass
             self.encoder.qwen_model = None
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_cache(self.device)
 
     def _prepare_src_video_frames(self, input_frames: torch.Tensor, max_frames: int = 16) -> List[Image.Image]:
         frame_count = int(input_frames.shape[1])
