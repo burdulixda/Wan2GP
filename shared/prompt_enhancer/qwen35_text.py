@@ -19,6 +19,7 @@ from shared.llm_engines.nanovllm.vllm_support import (
     NanoVllmTextEngine,
     resolve_lm_decoder_engine,
 )
+from shared.accelerator import empty_cache, get_accelerator_type, get_preferred_device, is_xpu_available, synchronize
 from shared.qtypes.gguf import GGUFWeightTensor, materialize_module_source_tensors
 try:
     from optimum.quanto.tensor.weights.qbytes import WeightQBytesTensor
@@ -62,6 +63,10 @@ def _env_enabled(name: str, default: bool = True) -> bool:
 
 def _is_mps_available() -> bool:
     return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+
+def _is_xpu_requested_and_available() -> bool:
+    return get_accelerator_type() == "xpu" and is_xpu_available()
 
 
 def _resolve_gguf_model_path(model_path: str | None, assets_dir: str, variant: str | None = None) -> str:
@@ -504,17 +509,59 @@ def _use_vllm_prompt_enhancer(model) -> bool:
         return False
     if not _env_enabled(QWEN35_TEXT_VLLM_SWITCH_ENV, default=True):
         return False
+    if torch.cuda.is_available():
+        return True
+    if _is_xpu_requested_and_available() and not bool(getattr(model, "_prompt_enhancer_allow_vllm_kernels", False)):
+        return True
+    return False
+
+
+def _has_legacy_text_runtime_device() -> bool:
+    if torch.cuda.is_available() or _is_mps_available():
+        return True
+    if _is_xpu_requested_and_available():
+        return True
+    return False
+
+
+def _supports_cuda_graph_pool() -> bool:
+    return torch.cuda.is_available() and get_accelerator_type() == "cuda"
+
+
+def _cleanup_prompt_enhancer_device_runtime() -> None:
+    synchronize()
+    empty_cache()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
+def _current_prompt_enhancer_device() -> torch.device:
+    preferred_device = get_preferred_device()
+    accelerator = get_accelerator_type(preferred_device)
+    if accelerator == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    if accelerator == "xpu" and is_xpu_available():
+        return torch.device(preferred_device)
+    if _is_mps_available():
+        return torch.device("mps")
+    if accelerator == "cpu":
+        return torch.device("cpu")
     if not torch.cuda.is_available():
-        return False
-    return True
+        raise RuntimeError("Qwen3.5 legacy prompt enhancement requires CUDA, XPU, or MPS.")
+    return torch.device("cuda", torch.cuda.current_device())
 
 
 def _use_legacy_cuda_runner_prompt_enhancer(model) -> bool:
-    return bool(getattr(model, "_prompt_enhancer_use_legacy_cuda_runner", False)) and (torch.cuda.is_available() or _is_mps_available())
+    if not bool(getattr(model, "_prompt_enhancer_use_legacy_cuda_runner", False)):
+        return False
+    return _has_legacy_text_runtime_device()
 
 
 def _get_assistant_graph_pool_handle(model, usage_mode: str | None, enable_cudagraph: bool):
-    if usage_mode != "assistant" or not enable_cudagraph or not torch.cuda.is_available():
+    if usage_mode != "assistant" or not enable_cudagraph or not _supports_cuda_graph_pool():
         return None
     handle = getattr(model, "_prompt_enhancer_assistant_graph_pool_handle", None)
     if handle is None:
@@ -704,19 +751,7 @@ def _unload_prompt_enhancer_text_runtime(self):
         pass
     reset_context()
     gc.collect()
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-        try:
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
+    _cleanup_prompt_enhancer_device_runtime()
 
 
 def _load_local_text_model(
@@ -754,11 +789,7 @@ def _tie_qwen35_output_to_embeddings(model: torch.nn.Module) -> None:
 
 
 def _resolve_legacy_text_execution_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda", torch.cuda.current_device())
-    if _is_mps_available():
-        return torch.device("mps")
-    raise RuntimeError("Qwen3.5 legacy prompt enhancement requires CUDA or MPS.")
+    return _current_prompt_enhancer_device()
 
 
 def _configure_qwen35_gguf_text_model(
